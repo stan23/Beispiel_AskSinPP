@@ -8,7 +8,9 @@
 // #define USE_OTA_BOOTLOADER
 // #define NDEBUG
 
-// Works with HLW8012 and CSE7759 measurement chip
+// #define USE_HW_SERIAL
+
+#define HJLDEBUG // Print measurement values
 
 #define EI_NOTEXTERNAL
 #include <EnableInterrupt.h>
@@ -17,7 +19,7 @@
 #include <HLW8012.h>
 #include <Switch.h>
 
-#define HLW_MEASURE_INTERVAL            4
+#define HLW_MEASURE_INTERVAL            1
 #define POWERMETER_CYCLIC_INTERVAL    120
 
 // use MightyCore Standard pinout for ATmega644PA
@@ -41,25 +43,21 @@
 #define GDO0_PIN                        2
 
 // number of available peers per channel
-#define PEERS_PER_SWCHANNEL     4
-#define PEERS_PER_PMCHANNEL     1
-#define PEERS_PER_SENSORCHANNEL 4
+#define PEERS_PER_SWCHANNEL     8
+#define PEERS_PER_PMCHANNEL     8
+#define PEERS_PER_SENSORCHANNEL 8
 
 // all library classes are placed in the namespace 'as'
 using namespace as;
 
 #define CURRENT_MODE                    LOW
 #define CURRENT_RESISTOR                0.001
-#define VOLTAGE_RESISTOR_UPSTREAM       ( 5 * 470000 ) // Real: 2280k
-#define VOLTAGE_RESISTOR_DOWNSTREAM     ( 1000 ) // Real 1.009k
-//#define defaultCurrentMultiplier      13670.9
-//#define defaultVoltageMultiplier      441250.69
-//#define defaultPowerMultiplier        12168954.98
+#define VOLTAGE_RESISTOR_UPSTREAM       ( 2 * 100000 ) // ( 2 * 100000 ) = Wert aus 'espurna' // ( 5 * 470000 ) = Wert aus Lib-Beispiel
+#define VOLTAGE_RESISTOR_DOWNSTREAM     ( 1000 )     // Real 1.009k
 
-#define USE_OWNCALIBRATION
-#define CurrentMultiplier             22580.87
-#define VoltageMultiplier             313433.96
-#define PowerMultiplier               3209.71
+#define CurrentMultiplier             22361   //25740   // Wert aus 'espurna'
+#define VoltageMultiplier             327831  //313400  // Wert aus 'espurna'
+#define PowerMultiplier               3476844 //3414290 // Wert aus 'espurna'
 
 HLW8012 hlw8012;
 
@@ -81,7 +79,7 @@ typedef struct {
 hlwValues actualValues ;
 hlwValues lastValues;
 uint8_t averaging = 1;
-
+bool    resetAverageCounting = false;
 // define all device properties
 const struct DeviceInfo PROGMEM devinfo = {
   {0x00, 0xac, 0x00},     // Device ID
@@ -94,7 +92,8 @@ const struct DeviceInfo PROGMEM devinfo = {
 
 // Configure the used hardware
 typedef AvrSPI<CS_PIN, MOSI_PIN, MISO_PIN, CLK_PIN> RadioSPI;
-typedef AskSin<StatusLed<LED_RED_PIN>, NoBattery, Radio<RadioSPI, GDO0_PIN> > Hal;
+typedef AskSin<StatusLed<LED_BLUE_PIN>, NoBattery, Radio<RadioSPI, GDO0_PIN> > Hal;
+typedef StatusLed<LED_RED_PIN> RedLedType;
 Hal hal;
 
 DEFREGISTER(Reg0, MASTERID_REGS, DREG_INTKEY, DREG_CONFBUTTONTIME, DREG_LOCALRESETDISABLE)
@@ -110,93 +109,31 @@ bool relayOn() {
   return (digitalRead(RELAY_PIN) == HIGH);
 }
 //typedef SwitchChannel<Hal, PEERS_PER_SWCHANNEL, PMSw1List0> SwChannel;
-class SwChannel : public Channel<Hal, SwitchList1, SwitchList3, EmptyList, PEERS_PER_SWCHANNEL, PMSw1List0>, public SwitchStateMachine {
+class SwChannel : public SwitchChannel<Hal, PEERS_PER_SWCHANNEL, PMSw1List0>  {
 
   protected:
-    typedef Channel<Hal, SwitchList1, SwitchList3, EmptyList, PEERS_PER_SWCHANNEL, PMSw1List0> BaseChannel;
-    uint8_t relay_pin;
-    uint8_t led_pin;
-    uint8_t lastmsgcnt;
+    typedef SwitchChannel<Hal, PEERS_PER_SWCHANNEL, PMSw1List0> BaseChannel;
+    RedLedType RedLed;
 
   public:
-    SwChannel () : BaseChannel(), relay_pin(0), led_pin(0), lastmsgcnt(0xff) {}
+    SwChannel () : BaseChannel() {}
     virtual ~SwChannel() {}
 
-    void init (uint8_t p, uint8_t l) {
-      relay_pin = p;
-      led_pin = l;
-      pinMode(relay_pin, OUTPUT);
-      pinMode(led_pin, OUTPUT);
-      typename BaseChannel::List1 l1 = BaseChannel::getList1();
-      status(l1.powerUpAction() == true ? 200 : 0, 0xffff );
-      BaseChannel::changed(true);
+    void init (uint8_t p) {
+      RedLed.init();
+      RedLed.invert(true);
+      BaseChannel::init(p);
     }
 
-    void setup(Device<Hal, PMSw1List0>* dev, uint8_t number, uint16_t addr) {
-      BaseChannel::setup(dev, number, addr);
-    }
-
-    uint8_t flags () const {
-      uint8_t flags = SwitchStateMachine::flags();
-      if ( this->device().battery().low() == true ) {
-        flags |= 0x80;
-      }
-      return flags;
-    }
-
-    virtual void switchState(__attribute__((unused)) uint8_t oldstate, uint8_t newstate, __attribute__((unused)) uint32_t delay) {
+    virtual void switchState(__attribute__((unused)) uint8_t oldstate, uint8_t newstate,uint32_t delay) {
+      BaseChannel::switchState(oldstate, newstate, delay);
       if ( newstate == AS_CM_JT_ON ) {
-        digitalWrite(relay_pin, HIGH);
-        digitalWrite(led_pin, LOW);
+        resetAverageCounting = true;
+        RedLed.ledOn();
       }
       else if ( newstate == AS_CM_JT_OFF ) {
-        digitalWrite(relay_pin, LOW);
-        digitalWrite(led_pin, HIGH);
+        RedLed.ledOff();
       }
-      BaseChannel::changed(true);
-    }
-
-    bool process (__attribute__((unused)) const ActionCommandMsg& msg) {
-      return true;
-    }
-
-    bool process (const ActionSetMsg& msg) {
-      status( msg.value(), msg.delay() );
-      return true;
-    }
-
-    bool process (const RemoteEventMsg& msg) {
-      bool lg = msg.isLong();
-      Peer p(msg.peer());
-      uint8_t cnt = msg.counter();
-      typename BaseChannel::List3 l3 = BaseChannel::getList3(p);
-      if ( l3.valid() == true ) {
-        // l3.dump();
-        typename BaseChannel::List3::PeerList pl = lg ? l3.lg() : l3.sh();
-        // pl.dump();
-        if ( cnt != lastmsgcnt || (lg == true && pl.multiExec() == true) ) {
-          lastmsgcnt = cnt;
-          remote(pl, cnt);
-        }
-        return true;
-      }
-      return false;
-    }
-
-    bool process (const SensorEventMsg& msg) {
-      bool lg = msg.isLong();
-      Peer p(msg.peer());
-      uint8_t cnt = msg.counter();
-      uint8_t value = msg.value();
-      typename BaseChannel::List3 l3 = BaseChannel::getList3(p);
-      if ( l3.valid() == true ) {
-        // l3.dump();
-        typename BaseChannel::List3::PeerList pl = lg ? l3.lg() : l3.sh();
-        // pl.dump();
-        sensor(pl, cnt, value);
-        return true;
-      }
-      return false;
     }
 };
 
@@ -274,10 +211,10 @@ class PowerMeterChannel : public Channel<Hal, MeasureList1, EmptyList, List4, PE
 
       bool sendMessage = false;
 
-      if ((txThresholdCurrent > 0)   && (abs((int)(actualValues.Current   - lastValues.Current))   >= txThresholdCurrent))   sendMessage = true;
-      if ((txThresholdFrequency > 0) && (abs((int)(actualValues.Frequency - lastValues.Frequency)) >= txThresholdFrequency)) sendMessage = true;
-      if ((txThresholdPower > 0)     && (abs((int)(actualValues.Power     - lastValues.Power))     >= txThresholdPower))     sendMessage = true;
-      if ((txThresholdVoltage > 0)   && (abs((int)(actualValues.Voltage   - lastValues.Voltage))   >= txThresholdVoltage))   sendMessage = true;
+      if ((txThresholdCurrent > 0)   && (abs((int)(actualValues.Current   - lastValues.Current))   >= (int)txThresholdCurrent))   sendMessage = true;
+      if ((txThresholdFrequency > 0) && (abs((int)(actualValues.Frequency - lastValues.Frequency)) >= (int)txThresholdFrequency)) sendMessage = true;
+      if ((txThresholdPower > 0)     && (abs((int)(actualValues.Power     - lastValues.Power))     >= (int)txThresholdPower))     sendMessage = true;
+      if ((txThresholdVoltage > 0)   && (abs((int)(actualValues.Voltage   - lastValues.Voltage))   >= (int)txThresholdVoltage))   sendMessage = true;
 
       if ((!sendMessage) && (actualValues.Voltage > 0) && (lastValues.Voltage == 0)) sendMessage = true;
 
@@ -478,11 +415,20 @@ class MixDevice : public ChannelDevice<Hal, VirtBaseChannel<Hal, PMSw1List0>, 6,
         void trigger (AlarmClock& clock)  {
 
           set(seconds2ticks(HLW_MEASURE_INTERVAL));
-          static uint8_t  avgCounter = 0;
           static uint32_t Power      = 0;
           static uint32_t Current    = 0;
           static uint32_t Voltage    = 0;
-          static uint32_t Frequency  = 0;
+          static uint8_t  avgCounter = 0;
+          //static uint32_t Frequency  = 0; //unused
+
+          if (resetAverageCounting == true) {
+            //DPRINTLN(F("*** RESETTING AVERAGING ***"));
+            resetAverageCounting = false;
+            avgCounter = 0;
+            Power = 0;
+            Voltage = 0;
+            Current = 0;
+          }
 
           if (avgCounter < averaging) {
             Power   += hlw8012.getActivePower() * 100;
@@ -493,18 +439,18 @@ class MixDevice : public ChannelDevice<Hal, VirtBaseChannel<Hal, PMSw1List0>, 6,
             actualValues.Power   = relayOn() ? (Power / averaging) : 0;
             actualValues.Voltage = (Voltage / averaging);
             actualValues.Current = relayOn() ? (Current / averaging) : 0;
-            avgCounter = 0;
-            Power = 0;
-            Voltage = 0;
-            Current = 0;
+            resetAverageCounting = true;
+
+#ifdef HJLDEBUG
+            DPRINT(F("[HJL-01] Active Power (W)    : ")); DDECLN(actualValues.Power / 100);
+            DPRINT(F("[HJL-01] Voltage (V)         : ")); DDECLN(actualValues.Voltage / 10);
+            DPRINT(F("[HJL-01] Current (mA)        : ")); DDECLN(actualValues.Current);
+            DPRINT(F("[HJL-01] Agg. energy (Wh)*10 : ")); DDECLN(actualValues.E_Counter);
+#endif
           }
 
           actualValues.E_Counter = (hlw8012.getEnergy()  / 3600.0)   * 10;
           actualValues.Frequency = 0; // not implemented
-          DPRINT(F("[HLW] Active Power (W)    : ")); DDECLN(actualValues.Power / 100);
-          DPRINT(F("[HLW] Voltage (V)         : ")); DDECLN(actualValues.Voltage / 10);
-          DPRINT(F("[HLW] Current (mA)        : ")); DDECLN(actualValues.Current);
-          DPRINT(F("[HLW] Agg. energy (Wh)*10 : ")); DDECLN(actualValues.E_Counter);
 
           clock.add(*this);
         }
@@ -554,30 +500,28 @@ MixDevice sdev(devinfo, 0x20);
 ConfigToggleButton<MixDevice> cfgBtn(sdev);
 
 void initPeerings (bool first) {
-  HMID devid;
-  sdev.getDeviceID(devid);
-  Peer ipeer(devid, 1);
-  sdev.channel(1).peer(ipeer);
+  if( first == true ) {
+    sdev.switchChannel().peer(cfgBtn.peer());
+  }
 }
 
 void setup () {
   DINIT(57600, ASKSIN_PLUS_PLUS_IDENTIFIER);
   bool first = sdev.init(hal);
-  sdev.switchChannel().init(RELAY_PIN, LED_BLUE_PIN);
+  sdev.switchChannel().init(RELAY_PIN);
   buttonISR(cfgBtn, BUTTON_PIN);
   initPeerings(first);
-  sdev.initDone();
   sdev.led().invert(true);
-  if ( digitalPinToInterrupt(CF1_PIN) == NOT_AN_INTERRUPT ) enableInterrupt(CF1_PIN, hlw8012_cf1_interrupt, CHANGE); else attachInterrupt(digitalPinToInterrupt(CF1_PIN), hlw8012_cf1_interrupt, CHANGE);
-  if ( digitalPinToInterrupt(CF_PIN) == NOT_AN_INTERRUPT ) enableInterrupt(CF_PIN, hlw8012_cf_interrupt, CHANGE); else attachInterrupt(digitalPinToInterrupt(CF_PIN), hlw8012_cf_interrupt, CHANGE);
+  sdev.initDone();
+  DDEVINFO(sdev);
+  if ( digitalPinToInterrupt(CF1_PIN) == NOT_AN_INTERRUPT ) enableInterrupt(CF1_PIN, hlw8012_cf1_interrupt, FALLING); else attachInterrupt(digitalPinToInterrupt(CF1_PIN), hlw8012_cf1_interrupt, FALLING);
+  if ( digitalPinToInterrupt(CF_PIN) == NOT_AN_INTERRUPT ) enableInterrupt(CF_PIN, hlw8012_cf_interrupt, FALLING); else attachInterrupt(digitalPinToInterrupt(CF_PIN), hlw8012_cf_interrupt, FALLING);
   hlw8012.begin(CF_PIN, CF1_PIN, SEL_PIN, CURRENT_MODE, true);
   hlw8012.setResistors(CURRENT_RESISTOR, VOLTAGE_RESISTOR_UPSTREAM, VOLTAGE_RESISTOR_DOWNSTREAM);
 
-#ifdef USE_OWNCALIBRATION
   hlw8012.setCurrentMultiplier(CurrentMultiplier);
   hlw8012.setVoltageMultiplier(VoltageMultiplier);
   hlw8012.setPowerMultiplier(PowerMultiplier);
-#endif
 }
 
 void loop() {

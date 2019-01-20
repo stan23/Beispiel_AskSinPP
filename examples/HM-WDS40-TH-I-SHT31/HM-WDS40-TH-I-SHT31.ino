@@ -10,10 +10,9 @@
 #include <EnableInterrupt.h>
 #include <AskSinPP.h>
 #include <LowPower.h>
+#include <sensors/Sht31.h> //https://github.com/adafruit/Adafruit_SHT31
 
 #include <MultiChannelDevice.h>
-// https://github.com/spease/Sensirion.git
-#include <Sensirion.h>
 
 // we use a Pro Mini
 // Arduino pin for the LED
@@ -46,8 +45,8 @@ using namespace as;
 
 // define all device properties
 const struct DeviceInfo PROGMEM devinfo = {
-  {0x34, 0x56, 0x80},     // Device ID
-  "JPTH10I003",           // Device Serial
+  {0x34, 0x3f, 0x00},     // Device ID
+  "JPTH10I000",           // Device Serial
   //{0x00, 0x3d},           // Device Model Outdoor
   {0x00, 0x3f},           // Device Model Indoor
   0x10,                   // Firmware Version
@@ -95,8 +94,7 @@ class WeatherChannel : public Channel<Hal, List1, EmptyList, List4, PEERS_PER_CH
     WeatherEventMsg msg;
     int16_t         temp;
     uint8_t         humidity;
-
-    Sensirion       sht10 = Sensirion(A4, A5);
+    Sht31<>         sht31; 
     uint16_t        millis;
 
   public:
@@ -107,14 +105,9 @@ class WeatherChannel : public Channel<Hal, List1, EmptyList, List4, PEERS_PER_CH
     // here we do the measurement
     void measure () {
       DPRINT("Measure...\n");
-      uint16_t rawData;
-      if ( sht10.measTemp(&rawData) == 0) {
-        float t = sht10.calcTemp(rawData);
-        temp = t * 10;
-        if ( sht10.measHumi(&rawData) == 0 ) {
-          humidity = sht10.calcHumi(rawData, t);
-        }
-      }
+      sht31.measure();
+      temp = sht31.temperature();
+      humidity = sht31.humidity();
       DPRINT("T/H = " + String(temp+OFFSETtemp) + "/" + String(humidity+OFFSEThumi) + "\n");
     }
 
@@ -134,6 +127,7 @@ class WeatherChannel : public Channel<Hal, List1, EmptyList, List4, PEERS_PER_CH
     }
     void setup(Device<Hal, List0>* dev, uint8_t number, uint16_t addr) {
       Channel::setup(dev, number, addr);
+      sht31.init();
       sysclock.add(*this);
     }
 
@@ -164,4 +158,3 @@ void loop() {
     hal.activity.savePower<Sleep<>>(hal);
   }
 }
-

@@ -51,7 +51,7 @@ const struct DeviceInfo PROGMEM devinfo = {
 */
 typedef LibSPI<10> SPIType;
 typedef Radio<SPIType, 2> RadioType;
-typedef DualStatusLed<5, 4> LedType;
+typedef DualStatusLed<LED_PIN2, LED_PIN> LedType;
 typedef AskSin<LedType, BatterySensor, RadioType> HalType;
 class Hal : public HalType {
     // extra clock to count button press events
@@ -94,6 +94,6 @@ void loop() {
   bool worked = hal.runready();
   bool poll = sdev.pollRadio();
   if (worked == false && poll == false ) {
-    hal.activity.savePower<Idle<>>(hal);
+    hal.activity.savePower<Sleep<>>(hal);
   }
 }
